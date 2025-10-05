@@ -8,7 +8,7 @@ async function ensurePyodide() {
     const py = await loadPyodide({
       indexURL: "https://cdn.jsdelivr.net/pyodide/v0.25.1/full/",
     });
-    // load Python packages into the in-browser runtime
+    // Load Python packages into the in-browser runtime
     await py.loadPackage(["pandas", "numpy", "python-dateutil"]);
     return py;
   })();
@@ -45,13 +45,17 @@ async function buildData(files) {
   const fileMap = {};
   for (const f of files) fileMap[f.name] = toBytes(await f.arrayBuffer());
 
+  // Read target date (YYYY-MM-DD) or empty
+  const targetDate = document.getElementById("targetDate").value || "";
+
   // Inject into Python globals
   py.globals.set("JS_FILE_MAP", fileMap);
   py.globals.set("JS_SETTINGS", settings);
+  py.globals.set("JS_TARGET_DATE", targetDate);
 
-  // IMPORTANT: do NOT import from 'js' here. We already set globals.
+  // IMPORTANT: do NOT import from 'js'; we already set globals.
   const pyCode = `
-res = build_all(JS_FILE_MAP.to_py(), JS_SETTINGS.to_py())
+res = build_all(JS_FILE_MAP.to_py(), JS_SETTINGS.to_py(), JS_TARGET_DATE)
 import json
 json.dumps(res)
   `;
@@ -65,7 +69,7 @@ json.dumps(res)
   return data;
 }
 
-// --- Minimal renderers (you can swap in your existing ones later) ---
+// --- Minimal renderers (swap in your existing ones later) ---
 function renderSummaryBlock(summary) {
   const wrap = document.getElementById("summary");
   const rows = Object.entries(summary.by_department || {}).map(([dept, m]) => `
