@@ -4,7 +4,7 @@ import io, json, pandas as pd
 from datetime import datetime
 from dateutil import parser as dparser
 
-PRESENT_MARKERS = {"X","Y","YES","TRUE","1","ON PREMISE","On Premise","PRESENT"}
+PRESENT_MARKERS = {"X","Y","YES","TRUE","1","ON PREMISE","On Premise","PRESENT","YELLOW","GREEN"}
 
 def _now_stamp(): return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -12,10 +12,10 @@ def _norm_id(x):
     s = str(x).strip().replace("\u200b","").replace(" ","")
     return s[:-2] if s.endswith(".0") else s
 
-def _read_csv_bytes(blob: bytes) -> pd.DataFrame:
+def _read_csv_any(blob: bytes, **kwargs) -> pd.DataFrame:
     if not blob: return pd.DataFrame()
-    for kw in ({}, {"skiprows":1}):
-        try: return pd.read_csv(io.BytesIO(blob), **kw)
+    for kw in ({}, {"skiprows":1}, {"header":None}, {"header":None,"encoding_errors":"ignore"}):
+        try: return pd.read_csv(io.BytesIO(blob), **{**kw, **kwargs})
         except Exception: pass
     return pd.DataFrame()
 
@@ -38,19 +38,63 @@ def _pick(df, want):
             if lw in c.lower(): return c
     return None
 
+# ---------- MyTime “weird header” fixer ----------
+def _fix_mytime_layout(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Many UKG/Kronos extracts start with banner rows like 'Hyperfind: Ad Hoc', 'Timeframe: Today'
+    and then the real header row appears a few lines later. This scans the first 30 rows to
+    find a row that contains Person/Employee and On Premise/Present, then uses it as header.
+    """
+    if df_raw.empty: return df_raw
+    # If it already looks good, return as-is
+    cols_low = [str(c).lower() for c in df_raw.columns]
+    if any("person id" in c or "employee id" in c for c in cols_low) and any("premise" in c or "present" in c for c in cols_low):
+        return df_raw
+
+    # Try header=None read to access raw rows
+    df0 = _read_csv_any(df_raw.to_csv(index=False).encode(), header=None)
+    # If that failed, try reading original bytes with header=None again
+    if df0.empty:
+        return df_raw
+
+    # Search top 30 rows for potential header row
+    header_row = None
+    for i in range(min(30, len(df0))):
+        row_vals = [str(x) for x in list(df0.iloc[i].values)]
+        joined = "|".join(row_vals).lower()
+        if ("person id" in joined or "employee id" in joined) and ("premise" in joined or "present" in joined):
+            header_row = i
+            break
+
+    if header_row is None:
+        # As a fallback, if we see a row containing 'Person' or 'Employee' broadly, use it
+        for i in range(min(30, len(df0))):
+            joined = "|".join([str(x) for x in list(df0.iloc[i].values)]).lower()
+            if ("person" in joined or "employee" in joined):
+                header_row = i
+                break
+
+    if header_row is None:
+        return df_raw
+
+    # Rebuild with that row as header
+    new_header = [str(x) for x in list(df0.iloc[header_row].values)]
+    body = df0.iloc[header_row+1:].reset_index(drop=True)
+    body.columns = new_header
+    # Drop empty/Unnamed columns
+    body = body.loc[:, [c for c in body.columns if str(c).strip() and "unnamed" not in str(c).lower()]]
+    return body
+
 # ---- File classifier by headers (not filenames) ----
 def _classify(df: pd.DataFrame):
     cols = set([c.lower() for c in df.columns]) if not df.empty else set()
-    if any("opportunity" in c or "acceptedcount" in c for c in cols):
+    if any("opportunity." in c or "acceptedcount" in c for c in cols):
         return "vetvto"
-    if any("swap" in c for c in cols) or ("date to skip") in " ".join(cols):
+    if any("swap" in c for c in cols) or ("date to skip" in " ".join(cols)):
         return "swaps"
     if any("on premise" in c or "onprem" in c or "present" in c for c in cols):
-        # MyTime often small set of columns, no dept mapping
-        # If it also has Department info, it's roster; we bias MyTime by fewer "department" hits
         deptish = sum(1 for c in cols if "dept" in c or "department" in c)
         return "roster" if deptish >= 2 else "mytime"
-    # fallback heuristics
     if any("department" in c for c in cols): return "roster"
     return "unknown"
 
@@ -66,10 +110,20 @@ def _dept_bucket(dept_id, ma_id, settings):
     return None
 
 def build_all(file_map: dict, settings: dict, target_date_str: str = "") -> dict:
-    # Load all CSVs first
+    # Load all CSVs first (rough read)
     loaded = []
     for name, blob in file_map.items():
-        df = _read_csv_bytes(blob)
+        df = _read_csv_any(blob)
+        # Try to fix MyTime banner layout if it looks like the 'Hyperfind/Timeframe' export
+        if not df.empty and any("hyperfind" in str(c).lower() for c in df.columns):
+            # re-read raw bytes header=None and try to detect the true header row
+            df_bytes = _read_csv_any(blob, header=None)
+            if not df_bytes.empty:
+                # heuristic: rebuild DataFrame from df_bytes by finding header row
+                # reuse the same function by passing through a temp roundtrip
+                fixed = _fix_mytime_layout(df_bytes)
+                if not fixed.empty:
+                    df = fixed
         kind = _classify(df)
         loaded.append({"name": name, "kind": kind, "cols": list(df.columns), "rows": int(df.shape[0]), "df": df})
 
@@ -79,19 +133,15 @@ def build_all(file_map: dict, settings: dict, target_date_str: str = "") -> dict
     vetvto_df = next((x["df"] for x in loaded if x["kind"] == "vetvto"), pd.DataFrame())
     swaps_df  = next((x["df"] for x in loaded if x["kind"] == "swaps"), pd.DataFrame())
 
-    # If something is still missing, try best guess by schema
-    if roster_df.empty:
-        cand = [x for x in loaded if any("department" in c.lower() for c in x["cols"])]
-        if cand: roster_df = max(cand, key=lambda x: x["rows"])["df"]
+    # If still missing MyTime and we have exactly one “unknown” with Hyperfind/Timeframe, try to fix it
     if mytime_df.empty:
-        cand = [x for x in loaded if any(("on premise" in c.lower()) or ("onprem" in c.lower()) or ("present" in c.lower()) for c in x["cols"])]
-        if cand: mytime_df = min(cand, key=lambda x: x["rows"])["df"]  # usually smaller
-    if vetvto_df.empty:
-        cand = [x for x in loaded if any("opportunity" in c.lower() or "acceptedcount" in c.lower() for c in x["cols"])]
-        if cand: vetvto_df = cand[0]["df"]
-    if swaps_df.empty:
-        cand = [x for x in loaded if any("swap" in c.lower() for c in x["cols"])]
-        if cand: swaps_df = cand[0]["df"]
+        for x in loaded:
+            if x["kind"] == "unknown" and any("hyperfind" in str(c).lower() for c in x["cols"]):
+                fixed = _fix_mytime_layout(x["df"])
+                if not fixed.empty:
+                    mytime_df = fixed
+                    x["kind"] = "mytime"
+                    break
 
     # Target date
     target_date = None
@@ -146,23 +196,20 @@ def build_all(file_map: dict, settings: dict, target_date_str: str = "") -> dict
             "present": on in PRESENT_MARKERS
         })
 
-    # ---- VET/VTO ----
+    # ---- VET/VTO (acceptedCount > 0; work date from shiftStart/shiftEnd) ----
     vet_out = []
     if not vetvto_df.empty:
         eid_v   = _pick(vetvto_df, ["employeeId","Employee ID","Person ID","Associate ID","ID"])
         typ_v   = _pick(vetvto_df, ["opportunity.type","Type","Opportunity Type"])
-        stat_v  = _pick(vetvto_df, ["Status","opportunity.status","Swap Status"])
         acc_v   = _pick(vetvto_df, ["opportunity.acceptedCount","Accepted Count","acceptedCount"])
-        work_v  = _pick(vetvto_df, ["Date to Work","Work Date","Work"])
-        approved_words = {"APPROVED","ACCEPTED","COMPLETED"}
+        work_v1 = _pick(vetvto_df, ["opportunity.shiftStart","shiftStart","Shift Start"])
+        work_v2 = _pick(vetvto_df, ["opportunity.shiftEnd","shiftEnd","Shift End"])
         for _, row in vetvto_df.iterrows():
             eid = _norm_id(row.get(eid_v,"")) if eid_v else ""
             if not eid: continue
-            accepted = str(row.get(acc_v,"")).strip() in {"1","1.0","TRUE","True"}
+            accepted = str(row.get(acc_v,"")).strip() not in {"","0","0.0","FALSE","False","NaN","nan"}
             if not accepted: continue
-            st = str(row.get(stat_v,"")).upper()
-            if not (st in approved_words or "APPROV" in st or "ACCEPT" in st): continue
-            wdt = _parse_date(row.get(work_v))
+            wdt = _parse_date(row.get(work_v1)) or _parse_date(row.get(work_v2))
             if target_date and wdt and wdt != target_date: 
                 continue
             typ = str(row.get(typ_v,"")).upper()
@@ -178,7 +225,7 @@ def build_all(file_map: dict, settings: dict, target_date_str: str = "") -> dict
                 "management_area_id": p["management_area_id"] if p else None
             })
 
-    # ---- Swaps ----
+    # ---- Swaps (as before) ----
     sw_out, sw_in_exp, sw_in_pres = [], [], []
     if not swaps_df.empty:
         id_s   = _pick(swaps_df, ["Employee 1 ID","Employee ID","Person ID","Associate ID","ID"])
@@ -251,28 +298,17 @@ def build_all(file_map: dict, settings: dict, target_date_str: str = "") -> dict
         elif r["type"] == "VTO":
             summary["by_department"][dept]["vto_accept"] += 1
 
-    # ---- Diagnostics ----
+    # ---- Diagnostics (keep this visible until numbers look right) ----
     diag = {
         "target_date": str(target_date) if target_date else None,
         "loaded_files": [
-            {"name": x["name"], "kind": x["kind"], "rows": x["rows"], "cols": x["cols"][:20]} for x in loaded
+            {"name": x["name"], "kind": x["kind"], "rows": x["rows"], "cols": x["cols"][:25]} for x in loaded
         ],
         "picked_columns": {
             "roster": {"eid": eid_col, "dept": dept_col, "employment_type": et_col, "on_prem": on_col, "ma": ma_col},
             "mytime": {"eid": mt_eid_col, "on_prem": mt_on_col},
-            "vetvto": {"eid": _pick(vetvto_df, ["employeeId","Employee ID","Person ID","Associate ID","ID"]),
-                       "type": _pick(vetvto_df, ["opportunity.type","Type","Opportunity Type"]),
-                       "status": _pick(vetvto_df, ["Status","opportunity.status","Swap Status"]),
-                       "accepted": _pick(vetvto_df, ["opportunity.acceptedCount","Accepted Count","acceptedCount"]),
-                       "work_date": _pick(vetvto_df, ["Date to Work","Work Date","Work"])},
-            "swaps": {"eid": _pick(swaps_df, ["Employee 1 ID","Employee ID","Person ID","Associate ID","ID"]),
-                      "status": _pick(swaps_df, ["Status","Swap Status"]),
-                      "skip_date": _pick(swaps_df, ["Date to Skip","Skip Date","Skip"]),
-                      "work_date": _pick(swaps_df, ["Date to Work","Work Date","Work"])}
         },
         "presence_count": len(pres),
-        "vet_records": len(vet_out),
-        "swap_counts": {"out": len(sw_out), "in_expected": len(sw_in_exp), "in_present": len(sw_in_pres)}
     }
 
     return {
