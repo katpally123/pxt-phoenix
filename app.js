@@ -39,8 +39,8 @@ async function buildData(files) {
   py.globals.set("JS_FILE_MAP", fileMap);
   py.globals.set("JS_SETTINGS", settings);
 
-  const pyCode = `
-from js import JS_FILE_MAP, JS_SETTINGS
+const pyCode = `
+# JS_FILE_MAP and JS_SETTINGS are already Python globals (JsProxy objects)
 res = build_all(JS_FILE_MAP.to_py(), JS_SETTINGS.to_py())
 import json
 json.dumps(res)
