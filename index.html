@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>PXT Phoenix (Pyodide)</title>
   <link rel="stylesheet" href="style.css"/>
-  <!-- Pyodide runtime (loads entirely in the browser; no data leaves the device) -->
+  <!-- Pyodide runtime (runs fully in the browser) -->
   <script src="https://cdn.jsdelivr.net/pyodide/v0.25.1/full/pyodide.js"></script>
 </head>
 <body>
@@ -21,6 +21,12 @@
       <input id="fileInput" type="file" multiple accept=".csv"/>
       <button id="runBtn">Build data</button>
       <button id="resetBtn" class="ghost">Reset</button>
+
+      <!-- Target date picker -->
+      <label style="margin-left:8px">
+        Target date:
+        <input id="targetDate" type="date">
+      </label>
     </div>
     <div id="status" class="status"></div>
   </section>
@@ -36,6 +42,6 @@
     <span>Ephemeral mode: refresh clears all data.</span>
   </footer>
 
-  <script src="app.js?v=2"></script>
+  <script src="app.js?v=3"></script>
 </body>
 </html>
