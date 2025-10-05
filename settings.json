@@ -1,43 +1,9 @@
 {
   "departments": {
-    "Inbound": {
-      "dept_ids": [
-        "1211010",
-        "1211020",
-        "1299010",
-        "1299020"
-      ]
-    },
-    "DA": {
-      "dept_ids": [
-        "1211030",
-        "1211040",
-        "1299030",
-        "1299040"
-      ]
-    },
-    "ICQA": {
-      "dept_ids": [
-        "1299070",
-        "1211070"
-      ],
-      "management_area_id": "27"
-    },
-    "CRETs": {
-      "dept_ids": [
-        "1299070",
-        "1211070"
-      ],
-      "management_area_id": "22"
-    }
+    "Inbound": { "dept_ids": ["1211010","1211020","1299010","1299020"] },
+    "DA":      { "dept_ids": ["1211030","1211040","1299030","1299040"] },
+    "ICQA":    { "dept_ids": ["1299070","1211070"], "management_area_id": "27" },
+    "CRETs":   { "dept_ids": ["1299070","1211070"], "management_area_id": "22" }
   },
-  "present_markers": [
-    "X",
-    "Y",
-    "YES",
-    "TRUE",
-    "1",
-    "ON PREMISE",
-    "On Premise"
-  ]
+  "present_markers": ["X","Y","YES","TRUE","1","ON PREMISE","PRESENT","YELLOW","GREEN"]
 }
