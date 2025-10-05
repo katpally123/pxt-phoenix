@@ -1,5 +1,6 @@
-let pyodidePromise = null;
+// PXT Phoenix – Pyodide glue (no backend, all local)
 
+let pyodidePromise = null;
 async function ensurePyodide() {
   if (pyodidePromise) return pyodidePromise;
 
@@ -7,53 +8,65 @@ async function ensurePyodide() {
     const py = await loadPyodide({
       indexURL: "https://cdn.jsdelivr.net/pyodide/v0.25.1/full/",
     });
-    // Load required Python packages into the in-browser runtime
+    // load Python packages into the in-browser runtime
     await py.loadPackage(["pandas", "numpy", "python-dateutil"]);
     return py;
   })();
 
   return pyodidePromise;
 }
+
 async function loadEngine(py) {
-  const code = await fetch("engine_pyodide.py").then(r=>r.text());
+  const code = await fetch("engine_pyodide.py").then(r => r.text());
   await py.runPythonAsync(code);
   return py.globals.get("build_all");
 }
 
-async function readSettings() { return fetch("settings.json").then(r=>r.json()); }
+async function readSettings() {
+  return fetch("settings.json").then(r => r.json());
+}
 
-function toBytes(buf){ return new Uint8Array(buf); }
+function toBytes(buf) {
+  return new Uint8Array(buf);
+}
 
 async function buildData(files) {
   const statusEl = document.getElementById("status");
   statusEl.textContent = "Loading Pyodide…";
   const py = await ensurePyodide();
+
   statusEl.textContent = "Preparing engine…";
   const buildAll = await loadEngine(py);
+
   statusEl.textContent = "Reading settings…";
   const settings = await readSettings();
 
+  // JS File objects → { name: bytes }
   const fileMap = {};
-  for (const f of files) { fileMap[f.name] = toBytes(await f.arrayBuffer()); }
+  for (const f of files) fileMap[f.name] = toBytes(await f.arrayBuffer());
 
+  // Inject into Python globals
   py.globals.set("JS_FILE_MAP", fileMap);
   py.globals.set("JS_SETTINGS", settings);
 
-const pyCode = `
-# JS_FILE_MAP and JS_SETTINGS are already Python globals (JsProxy objects)
+  // IMPORTANT: do NOT import from 'js' here. We already set globals.
+  const pyCode = `
 res = build_all(JS_FILE_MAP.to_py(), JS_SETTINGS.to_py())
 import json
 json.dumps(res)
-`;
+  `;
+
   statusEl.textContent = "Processing in browser…";
   const jsonStr = await py.runPythonAsync(pyCode);
   statusEl.textContent = "Done.";
   const data = JSON.parse(jsonStr);
-  document.getElementById("badge").textContent = "Data as of: " + (data.generated_at || new Date().toISOString());
+  document.getElementById("badge").textContent =
+    "Data as of: " + (data.generated_at || new Date().toISOString());
   return data;
 }
 
-function renderSummaryBlock(summary){
+// --- Minimal renderers (you can swap in your existing ones later) ---
+function renderSummaryBlock(summary) {
   const wrap = document.getElementById("summary");
   const rows = Object.entries(summary.by_department || {}).map(([dept, m]) => `
     <tr>
@@ -80,7 +93,7 @@ function renderSummaryBlock(summary){
     </table>`;
 }
 
-function renderVetBlock(vet){
+function renderVetBlock(vet) {
   const wrap = document.getElementById("vet");
   const rows = (vet.records||[]).map(r=>`
     <tr><td>${r.work_date||""}</td><td>${r.type||""}</td><td>${r.eid||""}</td><td>${r.dept_id||""}</td><td>${r.management_area_id||""}</td><td>${r.employment_type||""}</td><td>${r.present?"✔":""}</td></tr>
@@ -93,9 +106,9 @@ function renderVetBlock(vet){
     </table>`;
 }
 
-function renderSwapsBlock(sw){
+function renderSwapsBlock(sw) {
   const wrap = document.getElementById("swaps");
-  function block(title, arr){
+  function block(title, arr) {
     return `
     <h3>${title} (${arr.length})</h3>
     <table class="table">
@@ -114,16 +127,20 @@ function renderSwapsBlock(sw){
 
 function renderAuditBlock(){ document.getElementById("audit").innerHTML = ""; }
 
+// Wire UI
 document.getElementById("runBtn").addEventListener("click", async () => {
   const files = document.getElementById("fileInput").files;
-  if (!files || files.length === 0){ alert("Please select your daily CSVs first."); return; }
+  if (!files || files.length === 0) { alert("Please select your daily CSVs first."); return; }
   try {
     const data = await buildData(files);
     renderSummaryBlock(data.dept_summary || {});
-    renderVetBlock(data.vet_vto || {records:[]});
-    renderSwapsBlock(data.swaps || {swap_out:[], swap_in_expected:[], swap_in_present:[]});
+    renderVetBlock(data.vet_vto || { records: [] });
+    renderSwapsBlock(data.swaps || { swap_out: [], swap_in_expected: [], swap_in_present: [] });
     renderAuditBlock();
-  } catch (e){ console.error(e); document.getElementById("status").textContent = "Error: " + e; }
+  } catch (e) {
+    console.error(e);
+    document.getElementById("status").textContent = "Error: " + e;
+  }
 });
 
 document.getElementById("resetBtn").addEventListener("click", () => {
