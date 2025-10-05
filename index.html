@@ -1,47 +1,42 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>PXT Phoenix (Pyodide)</title>
-  <link rel="stylesheet" href="style.css"/>
-  <!-- Pyodide runtime (runs fully in the browser) -->
-  <script src="https://cdn.jsdelivr.net/pyodide/v0.25.1/full/pyodide.js"></script>
+  <title>PXT Attendance Builder</title>
+  <style>
+    body { font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 16px; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin: 8px 0; }
+    #log { height: 160px; overflow: auto; background: #f9f9f9; padding: 8px; white-space: pre-wrap; }
+    button { padding: 8px 12px; border-radius: 8px; border: 1px solid #ccc; cursor: pointer; }
+    input[type="text"] { padding: 6px 8px; border-radius: 6px; border: 1px solid #ccc; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
 </head>
 <body>
-  <header class="topbar">
-    <h1>PXT Phoenix</h1>
-    <div id="badge" class="badge">Data as of: —</div>
-  </header>
+  <h2>Upload daily CSVs</h2>
+  <p>Your files are processed locally in the browser and are never uploaded to any server.</p>
 
-  <section class="panel">
-    <h2>Upload daily CSVs</h2>
-    <p class="hint">Your files are processed locally in the browser and are never uploaded to any server.</p>
-    <div class="uploader">
-      <input id="fileInput" type="file" multiple accept=".csv"/>
-      <button id="runBtn">Build data</button>
-      <button id="resetBtn" class="ghost">Reset</button>
+  <div class="card">
+    <label>6 files</label><br/>
+    <input id="csvFiles" type="file" multiple accept=".csv"/>
+  </div>
 
-      <!-- Target date picker -->
-      <label style="margin-left:8px">
-        Target date:
-        <input id="targetDate" type="date">
-      </label>
-    </div>
-    <div id="status" class="status"></div>
-  </section>
+  <div class="card">
+    <label for="targetDate">Target date:&nbsp;</label>
+    <input id="targetDate" type="text" placeholder="DD/MM/YYYY" value="04/10/2025"/>
+  </div>
 
-  <section id="content">
-    <div id="summary"></div>
-    <div id="vet"></div>
-    <div id="swaps"></div>
-    <div id="audit"></div>
-  </section>
+  <div class="card">
+    <button id="buildBtn">Build data</button>
+    <button id="resetBtn">Reset</button>
+  </div>
 
-  <footer class="footer">
-    <span>Ephemeral mode: refresh clears all data.</span>
-  </footer>
+  <div class="card">
+    <strong>Log</strong>
+    <pre id="log"></pre>
+  </div>
 
-  <script src="app.js?v=3"></script>
+  <script src="app.js"></script>
 </body>
 </html>
