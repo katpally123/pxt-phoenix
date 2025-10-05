@@ -1,39 +1,61 @@
 # Runs entirely in the browser via Pyodide. No storage, no network.
-# This version includes target-date filtering and ICQA/CRETs MA gating.
 
 import io, json, pandas as pd
 from datetime import datetime
 from dateutil import parser as dparser
 
-PRESENT_MARKERS = {"X","Y","YES","TRUE","1","ON PREMISE","On Premise"}
+PRESENT_MARKERS = {"X","Y","YES","TRUE","1","ON PREMISE","On Premise","PRESENT"}
 
-def _now_stamp():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def _now_stamp(): return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def _norm_id(x):
     s = str(x).strip().replace("\u200b","").replace(" ","")
     return s[:-2] if s.endswith(".0") else s
 
 def _read_csv_bytes(blob: bytes) -> pd.DataFrame:
-    if not blob:
-        return pd.DataFrame()
+    if not blob: return pd.DataFrame()
     for kw in ({}, {"skiprows":1}):
-        try:
-            return pd.read_csv(io.BytesIO(blob), **kw)
-        except Exception:
-            pass
+        try: return pd.read_csv(io.BytesIO(blob), **kw)
+        except Exception: pass
     return pd.DataFrame()
 
 def _parse_date(x):
     if pd.isna(x): return None
-    try:
-        return dparser.parse(str(x), dayfirst=False, fuzzy=True).date()
-    except Exception:
-        return None
+    try: return dparser.parse(str(x), dayfirst=False, fuzzy=True).date()
+    except Exception: return None
+
+def _pick(df, want):
+    if df is None or df.empty: return None
+    cols = list(df.columns)
+    # exact (case-insensitive)
+    for w in want:
+        for c in cols:
+            if w.lower() == c.lower(): return c
+    # fuzzy contains
+    for w in want:
+        lw = w.lower()
+        for c in cols:
+            if lw in c.lower(): return c
+    return None
+
+# ---- File classifier by headers (not filenames) ----
+def _classify(df: pd.DataFrame):
+    cols = set([c.lower() for c in df.columns]) if not df.empty else set()
+    if any("opportunity" in c or "acceptedcount" in c for c in cols):
+        return "vetvto"
+    if any("swap" in c for c in cols) or ("date to skip") in " ".join(cols):
+        return "swaps"
+    if any("on premise" in c or "onprem" in c or "present" in c for c in cols):
+        # MyTime often small set of columns, no dept mapping
+        # If it also has Department info, it's roster; we bias MyTime by fewer "department" hits
+        deptish = sum(1 for c in cols if "dept" in c or "department" in c)
+        return "roster" if deptish >= 2 else "mytime"
+    # fallback heuristics
+    if any("department" in c for c in cols): return "roster"
+    return "unknown"
 
 def _dept_bucket(dept_id, ma_id, settings):
-    if not dept_id:
-        return None
+    if not dept_id: return None
     for k, v in settings.get("departments", {}).items():
         ids = set(map(str, v.get("dept_ids", [])))
         need_ma = str(v.get("management_area_id", "")) if v.get("management_area_id") else None
@@ -44,42 +66,51 @@ def _dept_bucket(dept_id, ma_id, settings):
     return None
 
 def build_all(file_map: dict, settings: dict, target_date_str: str = "") -> dict:
-    # ---- Detect & read inputs by filename hints ----
-    roster = _read_csv_bytes(next((b for n,b in file_map.items() if "employee" in n.lower() or "roster" in n.lower()), b""))
-    mytime = _read_csv_bytes(next((b for n,b in file_map.items() if "attendance" in n.lower() or "daily" in n.lower()), b""))
-    vetvto = _read_csv_bytes(next((b for n,b in file_map.items() if "posting" in n.lower() or "vet" in n.lower() or "vto" in n.lower()), b""))
-    swaps  = _read_csv_bytes(next((b for n,b in file_map.items() if "swap" in n.lower()), b""))
+    # Load all CSVs first
+    loaded = []
+    for name, blob in file_map.items():
+        df = _read_csv_bytes(blob)
+        kind = _classify(df)
+        loaded.append({"name": name, "kind": kind, "cols": list(df.columns), "rows": int(df.shape[0]), "df": df})
 
+    # Choose by kind
+    roster_df = next((x["df"] for x in loaded if x["kind"] == "roster"), pd.DataFrame())
+    mytime_df = next((x["df"] for x in loaded if x["kind"] == "mytime"), pd.DataFrame())
+    vetvto_df = next((x["df"] for x in loaded if x["kind"] == "vetvto"), pd.DataFrame())
+    swaps_df  = next((x["df"] for x in loaded if x["kind"] == "swaps"), pd.DataFrame())
+
+    # If something is still missing, try best guess by schema
+    if roster_df.empty:
+        cand = [x for x in loaded if any("department" in c.lower() for c in x["cols"])]
+        if cand: roster_df = max(cand, key=lambda x: x["rows"])["df"]
+    if mytime_df.empty:
+        cand = [x for x in loaded if any(("on premise" in c.lower()) or ("onprem" in c.lower()) or ("present" in c.lower()) for c in x["cols"])]
+        if cand: mytime_df = min(cand, key=lambda x: x["rows"])["df"]  # usually smaller
+    if vetvto_df.empty:
+        cand = [x for x in loaded if any("opportunity" in c.lower() or "acceptedcount" in c.lower() for c in x["cols"])]
+        if cand: vetvto_df = cand[0]["df"]
+    if swaps_df.empty:
+        cand = [x for x in loaded if any("swap" in c.lower() for c in x["cols"])]
+        if cand: swaps_df = cand[0]["df"]
+
+    # Target date
     target_date = None
     if target_date_str:
-        try:
-            target_date = dparser.parse(target_date_str).date()
-        except Exception:
-            target_date = None
-
-    # ---- Column pick helper (exact then fuzzy) ----
-    def pick(df, want):
-        cols = list(df.columns)
-        for w in want:
-            for c in cols:
-                if w.lower() == c.lower(): return c
-        for w in want:
-            for c in cols:
-                if w.lower() in c.lower(): return c
-        return None
+        try: target_date = dparser.parse(target_date_str).date()
+        except Exception: target_date = None
 
     # ---- Normalize roster ----
-    eid_col   = pick(roster, ["Employee ID","Person ID","Associate ID","ID"])
-    dept_col  = pick(roster, ["Department ID","Department"])
-    et_col    = pick(roster, ["Employment Type","EmploymentType","Emp Type"])
-    on_col    = pick(roster, ["On Premise","OnPremise","Present","Status"])
-    ma_col    = pick(roster, ["Management Area ID","ManagementAreaId","MA ID","Corner","Management Area"])
-    name_col  = pick(roster, ["First Name","Given Name","Name"])
-    lname_col = pick(roster, ["Last Name","Surname"])
+    eid_col   = _pick(roster_df, ["Employee ID","Person ID","Associate ID","ID"])
+    dept_col  = _pick(roster_df, ["Department ID","Department"])
+    et_col    = _pick(roster_df, ["Employment Type","EmploymentType","Emp Type"])
+    on_col    = _pick(roster_df, ["On Premise","OnPremise","Present","Status"])
+    ma_col    = _pick(roster_df, ["Management Area ID","ManagementAreaId","MA ID","Corner","Management Area"])
+    fn_col    = _pick(roster_df, ["First Name","Given Name","First"])
+    ln_col    = _pick(roster_df, ["Last Name","Surname","Last"])
 
     roster_norm = []
-    if not roster.empty and eid_col:
-        for _, r in roster.iterrows():
+    if not roster_df.empty and eid_col:
+        for _, r in roster_df.iterrows():
             eid = _norm_id(r.get(eid_col, ""))
             if not eid: continue
             roster_norm.append({
@@ -88,23 +119,23 @@ def build_all(file_map: dict, settings: dict, target_date_str: str = "") -> dict
                 "employment_type": str(r.get(et_col, "")),
                 "management_area_id": str(r.get(ma_col, "")),
                 "on_roster": str(r.get(on_col, "")).upper(),
-                "name": (str(r.get(name_col, "")) + " " + str(r.get(lname_col, ""))).strip()
+                "name": (str(r.get(fn_col, "")) + " " + str(r.get(ln_col, ""))).strip()
             })
-    roster_df = pd.DataFrame(roster_norm)
+    rosterN = pd.DataFrame(roster_norm)
 
     # ---- Normalize MyTime presence ----
-    mt_eid_col = pick(mytime, ["Person ID","Employee ID","ID"])
-    mt_on_col  = pick(mytime, ["On Premise","OnPremise","Present","Status"])
+    mt_eid_col = _pick(mytime_df, ["Person ID","Employee ID","ID"])
+    mt_on_col  = _pick(mytime_df, ["On Premise","OnPremise","Present","Status"])
     mt_map = {}
-    if not mytime.empty and mt_eid_col:
-        for _, r in mytime.iterrows():
+    if not mytime_df.empty and mt_eid_col:
+        for _, r in mytime_df.iterrows():
             e = _norm_id(r.get(mt_eid_col,""))
             if not e: continue
             mt_map[e] = str(r.get(mt_on_col,"")).upper() if mt_on_col else ""
 
     # ---- Presence map (MyTime preferred; roster fallback) ----
     pres = []
-    for _, r in roster_df.iterrows():
+    for _, r in rosterN.iterrows():
         on = mt_map.get(r["eid"], r["on_roster"])
         pres.append({
             "eid": r["eid"],
@@ -115,16 +146,16 @@ def build_all(file_map: dict, settings: dict, target_date_str: str = "") -> dict
             "present": on in PRESENT_MARKERS
         })
 
-    # ---- VET/VTO records (filtered to target_date if provided) ----
+    # ---- VET/VTO ----
     vet_out = []
-    if not vetvto.empty:
-        eid_v   = pick(vetvto, ["employeeId","Employee ID","Person ID","Associate ID","ID"])
-        typ_v   = pick(vetvto, ["opportunity.type","Type","Opportunity Type"])
-        stat_v  = pick(vetvto, ["Status","opportunity.status","Swap Status"])
-        acc_v   = pick(vetvto, ["opportunity.acceptedCount","Accepted Count","acceptedCount"])
-        work_v  = pick(vetvto, ["Date to Work","Work Date","Work"])
+    if not vetvto_df.empty:
+        eid_v   = _pick(vetvto_df, ["employeeId","Employee ID","Person ID","Associate ID","ID"])
+        typ_v   = _pick(vetvto_df, ["opportunity.type","Type","Opportunity Type"])
+        stat_v  = _pick(vetvto_df, ["Status","opportunity.status","Swap Status"])
+        acc_v   = _pick(vetvto_df, ["opportunity.acceptedCount","Accepted Count","acceptedCount"])
+        work_v  = _pick(vetvto_df, ["Date to Work","Work Date","Work"])
         approved_words = {"APPROVED","ACCEPTED","COMPLETED"}
-        for _, row in vetvto.iterrows():
+        for _, row in vetvto_df.iterrows():
             eid = _norm_id(row.get(eid_v,"")) if eid_v else ""
             if not eid: continue
             accepted = str(row.get(acc_v,"")).strip() in {"1","1.0","TRUE","True"}
@@ -147,15 +178,15 @@ def build_all(file_map: dict, settings: dict, target_date_str: str = "") -> dict
                 "management_area_id": p["management_area_id"] if p else None
             })
 
-    # ---- Swaps (filter by Skip/Work == target_date if provided) ----
+    # ---- Swaps ----
     sw_out, sw_in_exp, sw_in_pres = [], [], []
-    if not swaps.empty:
-        id_s   = pick(swaps, ["Employee 1 ID","Employee ID","Person ID","Associate ID","ID"])
-        stat_s = pick(swaps, ["Status","Swap Status"])
-        skip_s = pick(swaps, ["Date to Skip","Skip Date","Skip"])
-        work_s = pick(swaps, ["Date to Work","Work Date","Work"])
+    if not swaps_df.empty:
+        id_s   = _pick(swaps_df, ["Employee 1 ID","Employee ID","Person ID","Associate ID","ID"])
+        stat_s = _pick(swaps_df, ["Status","Swap Status"])
+        skip_s = _pick(swaps_df, ["Date to Skip","Skip Date","Skip"])
+        work_s = _pick(swaps_df, ["Date to Work","Work Date","Work"])
         appr_words = {"APPROVED","COMPLETED","ACCEPTED"}
-        for _, row in swaps.iterrows():
+        for _, row in swaps_df.iterrows():
             eid = _norm_id(row.get(id_s,"")) if id_s else ""
             if not eid: continue
             st = str(row.get(stat_s,"")).upper()
@@ -189,11 +220,9 @@ def build_all(file_map: dict, settings: dict, target_date_str: str = "") -> dict
             "regular_expected_AMZN":0, "regular_present_AMZN":0,
             "regular_expected_TEMP":0, "regular_present_TEMP":0,
             "swap_out":0, "swap_in_expected":0, "swap_in_present":0,
-            "vet_accept":0, "vet_present":0,
-            "vto_accept":0
+            "vet_accept":0, "vet_present":0, "vto_accept":0
         } for k in ["Inbound","DA","ICQA","CRETs"]}
     }
-
     for p in pres:
         dept = _dept_bucket(p["dept_id"], p["management_area_id"], settings)
         if not dept: continue
@@ -222,11 +251,36 @@ def build_all(file_map: dict, settings: dict, target_date_str: str = "") -> dict
         elif r["type"] == "VTO":
             summary["by_department"][dept]["vto_accept"] += 1
 
+    # ---- Diagnostics ----
+    diag = {
+        "target_date": str(target_date) if target_date else None,
+        "loaded_files": [
+            {"name": x["name"], "kind": x["kind"], "rows": x["rows"], "cols": x["cols"][:20]} for x in loaded
+        ],
+        "picked_columns": {
+            "roster": {"eid": eid_col, "dept": dept_col, "employment_type": et_col, "on_prem": on_col, "ma": ma_col},
+            "mytime": {"eid": mt_eid_col, "on_prem": mt_on_col},
+            "vetvto": {"eid": _pick(vetvto_df, ["employeeId","Employee ID","Person ID","Associate ID","ID"]),
+                       "type": _pick(vetvto_df, ["opportunity.type","Type","Opportunity Type"]),
+                       "status": _pick(vetvto_df, ["Status","opportunity.status","Swap Status"]),
+                       "accepted": _pick(vetvto_df, ["opportunity.acceptedCount","Accepted Count","acceptedCount"]),
+                       "work_date": _pick(vetvto_df, ["Date to Work","Work Date","Work"])},
+            "swaps": {"eid": _pick(swaps_df, ["Employee 1 ID","Employee ID","Person ID","Associate ID","ID"]),
+                      "status": _pick(swaps_df, ["Status","Swap Status"]),
+                      "skip_date": _pick(swaps_df, ["Date to Skip","Skip Date","Skip"]),
+                      "work_date": _pick(swaps_df, ["Date to Work","Work Date","Work"])}
+        },
+        "presence_count": len(pres),
+        "vet_records": len(vet_out),
+        "swap_counts": {"out": len(sw_out), "in_expected": len(sw_in_exp), "in_present": len(sw_in_pres)}
+    }
+
     return {
         "generated_at": _now_stamp(),
         "dept_summary": summary,
         "presence_map": {"generated_at": _now_stamp(), "presence": pres},
         "vet_vto": {"generated_at": _now_stamp(), "records": vet_out},
         "swaps": {"generated_at": _now_stamp(), "swap_out": sw_out,
-                  "swap_in_expected": sw_in_exp, "swap_in_present": sw_in_pres}
+                  "swap_in_expected": sw_in_exp, "swap_in_present": sw_in_pres},
+        "diagnostics": diag
     }
