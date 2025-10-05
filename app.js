@@ -1,145 +1,116 @@
-// PXT Phoenix – Pyodide glue (no backend, all local)
+// app.js — v2025-10-05 (Pyodide + engine reload safe call)
 
-let pyodidePromise = null;
-async function ensurePyodide() {
-  if (pyodidePromise) return pyodidePromise;
-  pyodidePromise = (async () => {
-    const py = await loadPyodide({ indexURL: "https://cdn.jsdelivr.net/pyodide/v0.25.1/full/" });
-    await py.loadPackage(["pandas", "numpy", "python-dateutil"]);
-    return py;
-  })();
-  return pyodidePromise;
-}
+const SETTINGS_URL = new URL("settings.json", document.baseURI).href;
+let SETTINGS = null;
+let pyodide = null;
 
-async function loadEngine(py) {
-  const code = await fetch("engine_pyodide.py?v=4").then(r => r.text());
-  await py.runPythonAsync(code);
-  return py.globals.get("build_all");
-}
+// ===== UI Elements =====
+const fileInput = document.getElementById("csvFiles");
+const buildBtn = document.getElementById("buildBtn");
+const resetBtn = document.getElementById("resetBtn");
+const dateEl   = document.getElementById("targetDate");
+const logEl    = document.getElementById("log");
 
-async function readSettings() { return fetch("settings.json").then(r => r.json()); }
-function toBytes(buf){ return new Uint8Array(buf); }
+// ===== Boot =====
+(async function boot() {
+  log("Loading Pyodide…");
+  pyodide = await loadPyodide({ indexURL: "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/" });
+  log("Pyodide ready");
 
-async function buildData(files) {
-  const statusEl = document.getElementById("status");
-  statusEl.textContent = "Loading Pyodide…";
-  const py = await ensurePyodide();
-  statusEl.textContent = "Preparing engine…";
-  await loadEngine(py);
-  statusEl.textContent = "Reading settings…";
-  const settings = await readSettings();
-
-  const fileMap = {};
-  for (const f of files) fileMap[f.name] = toBytes(await f.arrayBuffer());
-  const targetDate = document.getElementById("targetDate").value || "";
-
-  py.globals.set("JS_FILE_MAP", fileMap);
-  py.globals.set("JS_SETTINGS", settings);
-  py.globals.set("JS_TARGET_DATE", targetDate);
-
-  const pyCode = `
-res = build_all(JS_FILE_MAP.to_py(), JS_SETTINGS.to_py(), JS_TARGET_DATE)
-import json
-json.dumps(res)
-`;
-  statusEl.textContent = "Processing in browser…";
-  const jsonStr = await py.runPythonAsync(pyCode);
-  statusEl.textContent = "Done.";
-  const data = JSON.parse(jsonStr);
-  document.getElementById("badge").textContent = "Data as of: " + (data.generated_at || new Date().toISOString());
-  return data;
-}
-
-// ----- Renderers -----
-function renderSummaryBlock(summary){
-  const wrap = document.getElementById("summary");
-  const rows = Object.entries(summary.by_department || {}).map(([dept, m]) => `
-    <tr>
-      <td>${dept}</td>
-      <td>${(m.regular_expected_AMZN||0)+(m.regular_expected_TEMP||0)}</td>
-      <td>${(m.regular_present_AMZN||0)+(m.regular_present_TEMP||0)}</td>
-      <td>${m.swap_out||0}</td>
-      <td>${m.swap_in_expected||0}</td>
-      <td>${m.swap_in_present||0}</td>
-      <td>${m.vet_accept||0}</td>
-      <td>${m.vet_present||0}</td>
-      <td>${m.vto_accept||0}</td>
-    </tr>
-  `).join("");
-  wrap.innerHTML = `
-    <h2>Department Summary</h2>
-    <table class="table">
-      <thead><tr>
-        <th>Dept</th><th>Regular Exp</th><th>Regular Present</th>
-        <th>Swap OUT</th><th>Swap IN Exp</th><th>Swap IN Pres</th>
-        <th>VET Acc</th><th>VET Pres</th><th>VTO Acc</th>
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table>`;
-}
-
-function renderVetBlock(vet){
-  const wrap = document.getElementById("vet");
-  const rows = (vet.records||[]).map(r=>`
-    <tr><td>${r.work_date||""}</td><td>${r.type||""}</td><td>${r.eid||""}</td><td>${r.dept_id||""}</td><td>${r.management_area_id||""}</td><td>${r.employment_type||""}</td><td>${r.present?"✔":""}</td></tr>
-  `).join("");
-  wrap.innerHTML = `
-    <h2>VET / VTO</h2>
-    <table class="table">
-      <thead><tr><th>Date</th><th>Type</th><th>EID</th><th>DeptID</th><th>MA</th><th>Type</th><th>Present</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>`;
-}
-
-function renderSwapsBlock(sw){
-  const wrap = document.getElementById("swaps");
-  function block(title, arr){
-    return `
-    <h3>${title} (${arr.length})</h3>
-    <table class="table">
-      <thead><tr><th>Skip</th><th>Work</th><th>EID</th><th>DeptID</th><th>MA</th><th>Type</th><th>Present</th></tr></thead>
-      <tbody>${
-        arr.map(r=>`<tr>
-          <td>${r.skip_date||""}</td><td>${r.work_date||""}</td>
-          <td>${r.eid||""}</td><td>${r.dept_id||""}</td><td>${r.management_area_id||""}</td>
-          <td>${r.employment_type||""}</td><td>${r.present?"✔":""}</td>
-        </tr>`).join("")
-      }</tbody>
-    </table>`;
+  try {
+    const r = await fetch(SETTINGS_URL, { cache: "no-store" });
+    if (r.ok) {
+      SETTINGS = await r.json();
+      log("Loaded settings.json");
+    } else {
+      log("settings.json not found — continuing with null");
+    }
+  } catch (e) {
+    log("settings.json fetch failed — continuing");
   }
-  wrap.innerHTML = `<h2>Swaps</h2>${block("Swap OUT", sw.swap_out||[])}${block("Swap IN (expected)", sw.swap_in_expected||[])}${block("Swap IN (present)", sw.swap_in_present||[])}`;
+
+  // create a Python module file in FS if you're bundling engine_pyodide.py locally
+  // If you serve engine_pyodide.py as a <script type=py>, skip this and rely on import.
+  await pyodide.FS.writeFile("/engine_pyodide.py", new TextEncoder().encode(`REPLACE_WITH_ENGINE_CODE_IF_EMBEDDING`));
+})();
+
+// ===== Helpers =====
+function log(msg) {
+  if (!logEl) return;
+  const time = new Date().toLocaleTimeString();
+  logEl.textContent += `[${time}] ${msg}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
 }
 
-function renderDiagnostics(diag){
-  const el = document.getElementById("audit");
-  el.innerHTML = `
-    <h2>Diagnostics</h2>
-    <pre style="white-space:pre-wrap">${JSON.stringify(diag, null, 2)}</pre>
-  `;
+async function filesToPyTuples(fileList) {
+  const tuples = [];
+  for (const f of fileList) {
+    const buf = new Uint8Array(await f.arrayBuffer());
+    // toPy converts TypedArray -> Python memoryview/bytes seamlessly
+    const pyBytes = pyodide.toPy(buf);
+    tuples.push([f.name, pyBytes]);
+  }
+  return pyodide.toPy(tuples); // becomes a Python list of (str, bytes)
 }
 
-document.getElementById("runBtn").addEventListener("click", async () => {
-  const files = document.getElementById("fileInput").files;
-  if (!files || files.length === 0){ alert("Please select your daily CSVs first."); return; }
-  try{
-    const data = await buildData(files);
-    renderSummaryBlock(data.dept_summary || {});
-    renderVetBlock(data.vet_vto || {records:[]});
-    renderSwapsBlock(data.swaps || {swap_out:[], swap_in_expected:[], swap_in_present:[]});
-    renderDiagnostics(data.diagnostics || {});
-    document.getElementById("status").textContent = "Done.";
-  }catch(e){
+function getTargetDateISO() {
+  // Expecting DD/MM/YYYY (e.g., 04/10/2025) from your UI sample
+  const raw = (dateEl?.value || "").trim();
+  const m = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!m) return null;
+  const [_, dd, mm, yyyy] = m;
+  return `${yyyy}-${mm}-${dd}`; // ISO
+}
+
+// ===== Actions =====
+buildBtn?.addEventListener("click", async () => {
+  try {
+    const files = fileInput?.files || [];
+    if (!files.length) {
+      alert("Select your 6 CSVs first.");
+      return;
+    }
+    const files_py = await filesToPyTuples(files);
+    const target_date_py = getTargetDateISO() || "";
+    const settings_py = SETTINGS ? pyodide.toPy(SETTINGS) : pyodide.toPy(null);
+
+    // inject variables
+    pyodide.globals.set("files_py", files_py);
+    pyodide.globals.set("target_date_py", target_date_py);
+    pyodide.globals.set("settings_py", settings_py);
+
+    const pyCode = `
+import sys, importlib, json
+# ensure module reload so we don't hold a stale build_all signature
+modname = "engine_pyodide"
+if modname in sys.modules:
+    importlib.reload(sys.modules[modname])
+else:
+    import engine_pyodide  # ensure first import
+
+import engine_pyodide as eng
+
+# Call is variadic-compatible: build_all(files, target_date, settings) works.
+_result = eng.build_all(files_py, target_date_py, settings_py)
+_result["engine_loaded"] = True
+_result["engine_version"] = _result.get("engine_version", "<unknown>")
+json.dumps(_result)
+    `;
+    log("Building…");
+    const out = await pyodide.runPythonAsync(pyCode);
+    const result = JSON.parse(out);
+    log(`Built OK — Engine ${result.engine_version}`);
+    // TODO: send result.tables + result.diagnostics into your renderers
+    console.log(result);
+  } catch (e) {
     console.error(e);
-    document.getElementById("status").textContent = "Error: " + e;
+    log(`ERROR: ${e?.message || e}`);
+    alert(`Build failed: ${e?.message || e}`);
   }
 });
 
-document.getElementById("resetBtn").addEventListener("click", () => {
-  document.getElementById("fileInput").value = "";
-  document.getElementById("summary").innerHTML = "";
-  document.getElementById("vet").innerHTML = "";
-  document.getElementById("swaps").innerHTML = "";
-  document.getElementById("audit").innerHTML = "";
-  document.getElementById("status").textContent = "Cleared. (Ephemeral mode)";
-  document.getElementById("badge").textContent = "Data as of: —";
+resetBtn?.addEventListener("click", () => {
+  fileInput.value = "";
+  if (dateEl) dateEl.value = "";
+  log("Reset.");
 });
