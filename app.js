@@ -1,10 +1,19 @@
 let pyodidePromise = null;
+
 async function ensurePyodide() {
   if (pyodidePromise) return pyodidePromise;
-  pyodidePromise = loadPyodide({ indexURL: "https://cdn.jsdelivr.net/pyodide/v0.25.1/full/" });
+
+  pyodidePromise = (async () => {
+    const py = await loadPyodide({
+      indexURL: "https://cdn.jsdelivr.net/pyodide/v0.25.1/full/",
+    });
+    // Load required Python packages into the in-browser runtime
+    await py.loadPackage(["pandas", "numpy", "python-dateutil"]);
+    return py;
+  })();
+
   return pyodidePromise;
 }
-
 async function loadEngine(py) {
   const code = await fetch("engine_pyodide.py").then(r=>r.text());
   await py.runPythonAsync(code);
