@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>PXT Phoenix (Pyodide)</title>
+  <link rel="stylesheet" href="style.css"/>
+  <!-- Pyodide runtime (loads entirely in the browser; no data leaves the device) -->
+  <script src="https://cdn.jsdelivr.net/pyodide/v0.25.1/full/pyodide.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <h1>PXT Phoenix</h1>
+    <div id="badge" class="badge">Data as of: —</div>
+  </header>
+
+  <section class="panel">
+    <h2>Upload daily CSVs</h2>
+    <p class="hint">Your files are processed locally in the browser and are never uploaded to any server.</p>
+    <div class="uploader">
+      <input id="fileInput" type="file" multiple accept=".csv"/>
+      <button id="runBtn">Build data</button>
+      <button id="resetBtn" class="ghost">Reset</button>
+    </div>
+    <div id="status" class="status"></div>
+  </section>
+
+  <section id="content">
+    <div id="summary"></div>
+    <div id="vet"></div>
+    <div id="swaps"></div>
+    <div id="audit"></div>
+  </section>
+
+  <footer class="footer">
+    <span>Ephemeral mode: refresh clears all data.</span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
